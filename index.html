@@ -189,8 +189,20 @@ function normCong(raw) {
   return s || "회중 미기재";
 }
 
+const HIGHLIGHT_KEYWORDS = ["하느님","여호와","성경","성서","연구","예수"];
+const HIGHLIGHT_PATTERN = new RegExp("(" + HIGHLIGHT_KEYWORDS.join("|") + ")", "g");
+function highlightKeywords(text) {
+  if (!text) return text;
+  return text.split(HIGHLIGHT_PATTERN).map((part, i) =>
+    HIGHLIGHT_KEYWORDS.includes(part)
+      ? <b key={i} style={{color:"#15803D",fontWeight:800}}>{part}</b>
+      : part
+  );
+}
+
 const STATUSES = [
   { key:"none",          label:"미지정",         color:"#9CA3AF", bg:"#F3F4F6" },
+  { key:"meaningful",    label:"의미 있는 대화",  color:"#0F766E", bg:"#CCFBF1" },
   { key:"revisit-maybe", label:"재방 가능",       color:"#A16207", bg:"#FEF9C3" },
   { key:"revisit-plan",  label:"재방 예정",       color:"#B45309", bg:"#FEF3C7" },
   { key:"revisit",       label:"재방 진행 중",    color:"#92400E", bg:"#FDE68A" },
@@ -348,6 +360,7 @@ function App() {
   const [expanded,setExpanded]         = useState({});
   const [groups,setGroups]             = useState({});
   const [linkingFrom,setLinkingFrom]   = useState(null);
+  const [boardFilter,setBoardFilter]   = useState(null);
 
   useEffect(() => {
     apiLoad().then(t=>{setTracking(t||{});setLoaded(true);}).catch(()=>{setLoadError(true);setLoaded(true);});
@@ -553,15 +566,28 @@ function App() {
       {tab==="board"&&(
         <div>
           <div style={ui.statRow}>
-            {STATUSES.filter(s=>s.key!=="none").map(s=>(
-              <div key={s.key} style={{...ui.statCard,borderTop:`3px solid ${s.color}`}}>
-                <div style={{fontSize:22,fontWeight:700,color:s.color}}>{stats[s.key]||0}</div>
-                <div style={{fontSize:12,color:"#6B7280"}}>{s.label}</div>
-              </div>
-            ))}
+            {STATUSES.filter(s=>s.key!=="none").map(s=>{
+              const active=boardFilter===s.key;
+              return (
+                <div key={s.key} onClick={()=>setBoardFilter(active?null:s.key)}
+                  style={{...ui.statCard,borderTop:`3px solid ${s.color}`,cursor:"pointer",
+                    boxShadow:active?`0 0 0 2px ${s.color}`:"none",
+                    background:active?`${s.color}14`:"#fff"}}>
+                  <div style={{fontSize:22,fontWeight:700,color:s.color}}>{stats[s.key]||0}</div>
+                  <div style={{fontSize:12,color:"#6B7280"}}>{s.label}</div>
+                </div>
+              );
+            })}
           </div>
+          {boardFilter&&(
+            <div style={{marginBottom:16,fontSize:13,color:"#6B7280"}}>
+              <b style={{color:STATUSES.find(s=>s.key===boardFilter)?.color}}>{STATUSES.find(s=>s.key===boardFilter)?.label}</b>만 보는 중 ·{" "}
+              <span style={{color:"#2563EB",cursor:"pointer",textDecoration:"underline"}} onClick={()=>setBoardFilter(null)}>전체 보기</span>
+            </div>
+          )}
           {trackedRecords.length===0&&<div style={ui.empty}>아직 진행 상태를 지정한 경험담이 없습니다.<br />경험담 목록에서 재방문·성서연구로 이어질 가능성이 있는 건의 진행 상태를 지정하면 여기에 자동으로 모입니다.</div>}
-          {STATUSES.filter(s=>s.key!=="none").map(s=>{
+          {boardFilter&&!(stats[boardFilter]||0)&&<div style={ui.empty}>해당 상태의 경험담이 없습니다.</div>}
+          {STATUSES.filter(s=>s.key!=="none"&&(!boardFilter||s.key===boardFilter)).map(s=>{
             const recs=trackedRecords.filter(r=>(tracking[r.id]?.status||"none")===s.key);
             if(!recs.length) return null;
             return (
@@ -612,11 +638,11 @@ function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo, link, li
         {isLinkSource&&<button style={ui.linkCancelBtn} onClick={e=>{e.stopPropagation();onCancelLink();}}>취소</button>}
       </div>
       <div style={ui.cardBody}>
-        <p style={ui.situText}>{r.situation||"(상황 미기재)"}</p>
+        <p style={ui.situText}>{r.situation?highlightKeywords(r.situation):"(상황 미기재)"}</p>
         {expanded&&(
           <div>
-            {r.response&&<div style={ui.section}><div style={ui.sectionLabel}>응대</div><p style={ui.bodyText}>{r.response}</p></div>}
-            {r.feeling&&r.feeling!=="-"&&<div style={ui.section}><div style={ui.sectionLabel}>느낀점</div><p style={ui.bodyText}>{r.feeling}</p></div>}
+            {r.response&&<div style={ui.section}><div style={ui.sectionLabel}>응대</div><p style={ui.bodyText}>{highlightKeywords(r.response)}</p></div>}
+            {r.feeling&&r.feeling!=="-"&&<div style={ui.section}><div style={ui.sectionLabel}>느낀점</div><p style={ui.bodyText}>{highlightKeywords(r.feeling)}</p></div>}
           </div>
         )}
         <button style={ui.expandBtn} onClick={e=>{e.stopPropagation();onToggleExpand();}}>{expanded?"접기 ▲":"자세히 보기 ▼"}</button>
