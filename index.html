@@ -200,12 +200,6 @@ function highlightKeywords(text) {
   );
 }
 
-const PHONE_PATTERN = /01[016789][-.\s]?\d{3,4}[-.\s]?\d{4}|0\d{1,2}[-.\s]?\d{3,4}[-.\s]?\d{4}/;
-function hasContactInfo(r) {
-  const text = `${r.situation||""} ${r.response||""} ${r.feeling||""}`;
-  return PHONE_PATTERN.test(text);
-}
-
 const STATUSES = [
   { key:"none",          label:"미지정",         color:"#9CA3AF", bg:"#F3F4F6" },
   { key:"meaningful",    label:"의미 있는 대화",  color:"#0F766E", bg:"#CCFBF1" },
@@ -403,7 +397,6 @@ function App() {
   const [groups,setGroups]             = useState({});
   const [linkingFrom,setLinkingFrom]   = useState(null);
   const [boardFilter,setBoardFilter]   = useState(null);
-  const [scanMsg,setScanMsg]           = useState(null);
   const [deleteTargetId,setDeleteTargetId] = useState(null);
 
   useEffect(() => {
@@ -464,20 +457,6 @@ function App() {
       return {...prev, [id]: entry};
     });
   }, []);
-
-  const runContactScan = () => {
-    let count = 0;
-    records.forEach(r=>{
-      if (!hasContactInfo(r)) return;
-      const gid = groupIdOfRecord[r.id];
-      const targetId = gid && groups[gid] ? groups[gid].repId : r.id;
-      const curStatus = tracking[targetId]?.status || "none";
-      if (curStatus === "none") { updateEntry(targetId, {status:"revisit-maybe"}); count++; }
-    });
-    setScanMsg(count>0
-      ? `📞 연락처가 있는 경험담 ${count}건을 "재방 가능"으로 분류했습니다.`
-      : "새로 분류할 연락처 정보가 발견되지 않았습니다.");
-  };
 
   const requestDelete = id => setDeleteTargetId(id);
   const cancelDelete  = () => setDeleteTargetId(null);
@@ -646,10 +625,6 @@ function App() {
 
       {tab==="board"&&(
         <div>
-          <div style={ui.scanRow}>
-            <button style={ui.scanBtn} onClick={runContactScan}>📞 연락처 감지 → 재방 가능 자동분류</button>
-            {scanMsg&&<span style={ui.scanMsg}>{scanMsg}</span>}
-          </div>
           <div style={ui.statRow}>
             {STATUSES.filter(s=>s.key!=="none").map(s=>{
               const active=boardFilter===s.key;
@@ -912,9 +887,6 @@ const ui = {
   statusBtn:{fontSize:12.5,padding:"8px 12px",borderRadius:16,border:"1px solid #E5E7EB",background:"#fff",color:"#6B7280",cursor:"pointer"},
   memoInput:{flex:1,minWidth:180,padding:"10px 12px",borderRadius:8,border:"1px solid #E5E7EB",fontSize:15},
   updatedAt:{fontSize:11,color:"#B4B4B4",textAlign:"right",width:"100%"},
-  scanRow:{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10,marginBottom:16},
-  scanBtn:{fontSize:12.5,padding:"9px 14px",borderRadius:10,border:"1px solid #A16207",background:"#FEF9C3",color:"#A16207",cursor:"pointer",whiteSpace:"nowrap",fontWeight:600},
-  scanMsg:{fontSize:12.5,color:"#6B7280"},
   statRow:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))",gap:10,marginBottom:24},
   statCard:{background:"#fff",border:"1px solid #E5E7EB",borderRadius:10,padding:"12px 8px",textAlign:"center"},
   boardHeading:{fontSize:16,fontWeight:800,margin:"0 0 10px"},
