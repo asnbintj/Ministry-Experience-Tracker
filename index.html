@@ -72,6 +72,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid #1E5F4E; outline-
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 
 <script>
 // ── AES-256-GCM 복호화 (Web Crypto API) ─────────────────────
@@ -100,6 +103,15 @@ async function decryptData(password, b64) {
 }
 
 let DATA = null;
+const REMEMBER_KEY = "sunteuk-pw"; // sessionStorage: 이 탭을 닫으면 자동 삭제됨
+
+async function unlockWithPassword(pw) {
+  const b64 = document.getElementById("enc-data").textContent.trim();
+  DATA = await decryptData(pw, b64);
+  document.getElementById("lock-screen").style.display = "none";
+  document.getElementById("root").style.display = "";
+  renderApp();
+}
 
 async function tryUnlock() {
   const pw  = document.getElementById("pw-input").value;
@@ -110,13 +122,9 @@ async function tryUnlock() {
   btn.innerHTML = '<span class="lock-spinner"></span>확인 중…';
   err.textContent = "";
   try {
-    const b64 = document.getElementById("enc-data").textContent.trim();
-    DATA = await decryptData(pw, b64);
-    // 세션 동안 암호 기억 (탭 닫으면 사라짐)
-    sessionStorage.setItem("sunteuk-unlocked", "1");
-    document.getElementById("lock-screen").style.display = "none";
-    document.getElementById("root").style.display = "";
-    renderApp();
+    await unlockWithPassword(pw);
+    // 이 탭을 닫을 때까지만 기억 (새로고침해도 다시 안 물어봄)
+    sessionStorage.setItem(REMEMBER_KEY, pw);
   } catch(e) {
     err.textContent = "암호가 맞지 않습니다. 다시 입력해 주세요.";
     btn.disabled = false;
@@ -126,12 +134,28 @@ async function tryUnlock() {
   }
 }
 
-// Enter 키로 열기
-document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("pw-input").addEventListener("keydown", e => {
+// Enter 키로 열기 + 같은 탭 새로고침 시 자동 재입장
+document.addEventListener("DOMContentLoaded", async () => {
+  const pwInput = document.getElementById("pw-input");
+  const btn = document.getElementById("unlock-btn");
+  pwInput.addEventListener("keydown", e => {
     if (e.key === "Enter") tryUnlock();
   });
-  document.getElementById("pw-input").focus();
+
+  const savedPw = sessionStorage.getItem(REMEMBER_KEY);
+  if (savedPw) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="lock-spinner"></span>자동으로 여는 중…';
+    try {
+      await unlockWithPassword(savedPw);
+      return;
+    } catch (e) {
+      sessionStorage.removeItem(REMEMBER_KEY);
+      btn.disabled = false;
+      btn.textContent = "열기";
+    }
+  }
+  pwInput.focus();
 });
 
 function renderApp() {
@@ -144,7 +168,7 @@ function renderApp() {
 <script id="app-script" type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useCallback } = React;
 
-const API_URL = (window.SHEET_API_URL || "").trim();
+const FIREBASE_ENABLED = !!(window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey);
 
 function normName(raw) {
   if (!raw || raw === "-") return "미기재";
@@ -166,12 +190,14 @@ function normCong(raw) {
 }
 
 const STATUSES = [
-  { key:"none",         label:"미지정",       color:"#9CA3AF", bg:"#F3F4F6" },
-  { key:"revisit-plan", label:"재방 예정",     color:"#B45309", bg:"#FEF3C7" },
-  { key:"revisit",      label:"재방 진행 중",  color:"#92400E", bg:"#FDE68A" },
-  { key:"study-offer",  label:"연구 제안함",   color:"#1D4ED8", bg:"#DBEAFE" },
-  { key:"study",        label:"성서 연구 중",  color:"#15803D", bg:"#DCFCE7" },
-  { key:"hold",         label:"보류/중단",     color:"#6B7280", bg:"#E5E7EB" },
+  { key:"none",          label:"미지정",         color:"#9CA3AF", bg:"#F3F4F6" },
+  { key:"revisit-maybe", label:"재방 가능",       color:"#A16207", bg:"#FEF9C3" },
+  { key:"revisit-plan",  label:"재방 예정",       color:"#B45309", bg:"#FEF3C7" },
+  { key:"revisit",       label:"재방 진행 중",    color:"#92400E", bg:"#FDE68A" },
+  { key:"study-maybe",   label:"연구 발전 가능",  color:"#0369A1", bg:"#E0F2FE" },
+  { key:"study-offer",   label:"연구 제안함",     color:"#1D4ED8", bg:"#DBEAFE" },
+  { key:"study",         label:"성서 연구 중",    color:"#15803D", bg:"#DCFCE7" },
+  { key:"hold",          label:"보류/중단",       color:"#6B7280", bg:"#E5E7EB" },
 ];
 const statusOf = k => STATUSES.find(s=>s.key===k) || STATUSES[0];
 
@@ -180,18 +206,129 @@ const monthShort = m => m.replace("26년 ","").replace(" 경험담","");
 const LOCAL_KEY = "sunteukgong-tracking-local-v1";
 
 async function apiLoad() {
-  if (!API_URL) { try { return JSON.parse(localStorage.getItem(LOCAL_KEY)||"{}"); } catch { return {}; } }
-  const res = await fetch(API_URL+"?action=load");
-  if (!res.ok) throw new Error("load failed");
-  return res.json();
+  const db = await window.firebaseReady;
+  if (!db) { try { return JSON.parse(localStorage.getItem(LOCAL_KEY)||"{}"); } catch { return {}; } }
+  const snap = await db.ref("tracking").once("value");
+  return snap.val() || {};
 }
 async function apiSave(id, entry) {
-  if (!API_URL) {
+  const db = await window.firebaseReady;
+  if (!db) {
     const cur = JSON.parse(localStorage.getItem(LOCAL_KEY)||"{}");
     cur[id] = entry; localStorage.setItem(LOCAL_KEY, JSON.stringify(cur)); return true;
   }
-  const res = await fetch(API_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({action:"save",id,entry}) });
-  return res.ok;
+  try {
+    await db.ref("tracking/" + id).set(entry);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+const GROUPS_LOCAL_KEY = "sunteukgong-groups-local-v1";
+
+async function apiLoadGroups() {
+  const db = await window.firebaseReady;
+  if (!db) { try { return JSON.parse(localStorage.getItem(GROUPS_LOCAL_KEY)||"{}"); } catch { return {}; } }
+  const snap = await db.ref("groups").once("value");
+  return snap.val() || {};
+}
+async function apiSaveGroup(groupId, group) {
+  const db = await window.firebaseReady;
+  if (!db) {
+    const cur = JSON.parse(localStorage.getItem(GROUPS_LOCAL_KEY)||"{}");
+    cur[groupId] = group; localStorage.setItem(GROUPS_LOCAL_KEY, JSON.stringify(cur)); return true;
+  }
+  try { await db.ref("groups/" + groupId).set(group); return true; } catch (e) { return false; }
+}
+async function apiDeleteGroup(groupId) {
+  const db = await window.firebaseReady;
+  if (!db) {
+    const cur = JSON.parse(localStorage.getItem(GROUPS_LOCAL_KEY)||"{}");
+    delete cur[groupId]; localStorage.setItem(GROUPS_LOCAL_KEY, JSON.stringify(cur)); return true;
+  }
+  try { await db.ref("groups/" + groupId).remove(); return true; } catch (e) { return false; }
+}
+
+// 두 경험담(또는 이미 연결된 묶음)을 하나로 합친다.
+// 양쪽에 진행 상태가 서로 다르게 이미 지정돼 있으면 확인 후 최근 것만 남긴다.
+function performLink(fromId, toId, { groups, tracking, recordsById, groupIdOfRecord }) {
+  if (!fromId || !toId || fromId === toId) return null;
+  const gFrom = groupIdOfRecord[fromId] || null;
+  const gTo   = groupIdOfRecord[toId] || null;
+
+  const memberSet = new Set();
+  if (gFrom && groups[gFrom]) groups[gFrom].members.forEach(id=>memberSet.add(id)); else memberSet.add(fromId);
+  if (gTo && groups[gTo]) groups[gTo].members.forEach(id=>memberSet.add(id)); else memberSet.add(toId);
+  const members = [...memberSet];
+
+  const byDateDesc = (a,b) => (recordsById[b]?.date||"").localeCompare(recordsById[a]?.date||"");
+
+  const candidateReps = [];
+  if (gFrom && groups[gFrom]?.repId) candidateReps.push(groups[gFrom].repId);
+  if (gTo && groups[gTo]?.repId && !candidateReps.includes(groups[gTo].repId)) candidateReps.push(groups[gTo].repId);
+  [fromId, toId].forEach(id=>{
+    if (!groupIdOfRecord[id] && tracking[id]?.status && tracking[id].status!=="none" && !candidateReps.includes(id)) candidateReps.push(id);
+  });
+
+  let repId;
+  if (candidateReps.length === 0) {
+    repId = [...members].sort(byDateDesc)[0];
+  } else if (candidateReps.length === 1) {
+    repId = candidateReps[0];
+  } else {
+    const [ra, rb] = candidateReps;
+    const la = statusOf(tracking[ra]?.status).label, lb = statusOf(tracking[rb]?.status).label;
+    const keep = window.confirm(
+      "두 건 모두 진행 상태가 지정되어 있습니다.\n\n" +
+      (recordsById[ra]?.date||"") + " (" + la + ")\n" + (recordsById[rb]?.date||"") + " (" + lb + ")\n\n" +
+      "더 최근 건의 진행 상태만 남고 나머지는 사라집니다. 계속할까요?"
+    );
+    if (!keep) return null;
+    repId = [ra, rb].sort(byDateDesc)[0];
+  }
+
+  const groupId = gFrom || gTo || ("g_"+repId+"_"+Date.now().toString(36));
+  const group = {
+    members: members.sort((a,b)=>(recordsById[a]?.date||"").localeCompare(recordsById[b]?.date||"")),
+    repId,
+    updatedAt: new Date().toISOString().slice(0,10),
+  };
+
+  const trackingPatches = {};
+  members.forEach(id=>{
+    if (id !== repId && tracking[id]?.status && tracking[id].status !== "none") {
+      trackingPatches[id] = { status:"none", memo:"" };
+    }
+  });
+
+  return {
+    groupId, group,
+    removeGroupIds: [gFrom, gTo].filter(g=>g && g!==groupId),
+    trackingPatches,
+  };
+}
+
+// 묶음에서 한 건만 빼낸다. 남는 게 1건 이하면 묶음 자체를 없앤다.
+function performUnlink(id, { groups, groupIdOfRecord, recordsById, tracking }) {
+  const gid = groupIdOfRecord[id];
+  if (!gid || !groups[gid]) return null;
+  const g = groups[gid];
+  const remaining = g.members.filter(m=>m!==id);
+  if (remaining.length <= 1) {
+    return { groupId:null, group:null, removeGroupIds:[gid], trackingPatches:{} };
+  }
+  let repId = g.repId;
+  if (repId === id) {
+    const withStatus = remaining.filter(m=>tracking[m]?.status && tracking[m].status!=="none");
+    repId = withStatus[0] || [...remaining].sort((a,b)=>(recordsById[b]?.date||"").localeCompare(recordsById[a]?.date||""))[0];
+  }
+  return {
+    groupId: gid,
+    group: { ...g, members: remaining, repId, updatedAt: new Date().toISOString().slice(0,10) },
+    removeGroupIds: [],
+    trackingPatches: {},
+  };
 }
 
 function App() {
@@ -209,9 +346,12 @@ function App() {
   const [loadError,setLoadError]       = useState(false);
   const [saveState,setSaveState]       = useState("idle");
   const [expanded,setExpanded]         = useState({});
+  const [groups,setGroups]             = useState({});
+  const [linkingFrom,setLinkingFrom]   = useState(null);
 
   useEffect(() => {
     apiLoad().then(t=>{setTracking(t||{});setLoaded(true);}).catch(()=>{setLoadError(true);setLoaded(true);});
+    apiLoadGroups().then(g=>setGroups(g||{})).catch(()=>{});
   }, []);
 
   const updateEntry = useCallback((id, patch) => {
@@ -226,6 +366,56 @@ function App() {
   }, []);
 
   const isTracked = id => { const s=tracking[id]?.status; return s&&s!=="none"; };
+
+  const recordsById = useMemo(()=>{ const m={}; records.forEach(r=>{m[r.id]=r;}); return m; }, []);
+  const groupIdOfRecord = useMemo(()=>{
+    const m={};
+    Object.entries(groups).forEach(([gid,g])=>{ (g.members||[]).forEach(id=>{ m[id]=gid; }); });
+    return m;
+  }, [groups]);
+
+  // 연결(그룹) 정보 저장 — 진행상태가 이미 pending patch로 남아있는 상태에서 호출됨
+  const applyGroupUpdate = useCallback((result) => {
+    if (!result) return;
+    setGroups(prev => {
+      const next = {...prev};
+      (result.removeGroupIds||[]).forEach(gid=>{ delete next[gid]; apiDeleteGroup(gid); });
+      if (result.groupId && result.group) { next[result.groupId]=result.group; apiSaveGroup(result.groupId, result.group); }
+      return next;
+    });
+    Object.entries(result.trackingPatches||{}).forEach(([id,patch])=>updateEntry(id,patch));
+  }, [updateEntry]);
+
+  const startLink   = id => setLinkingFrom(prev => prev===id ? null : id);
+  const cancelLink  = () => setLinkingFrom(null);
+  const confirmLink = targetId => {
+    const result = performLink(linkingFrom, targetId, { groups, tracking, recordsById, groupIdOfRecord });
+    setLinkingFrom(null);
+    applyGroupUpdate(result);
+  };
+  const unlinkRecord = id => {
+    const result = performUnlink(id, { groups, groupIdOfRecord, recordsById, tracking });
+    applyGroupUpdate(result);
+  };
+
+  const getLinkMeta = useCallback((rec) => {
+    const gid = groupIdOfRecord[rec.id];
+    if (!gid || !groups[gid]) return { grouped:false };
+    const g = groups[gid];
+    const isRep = g.repId === rec.id;
+    const repRecord = recordsById[g.repId] || rec;
+    const otherMembers = g.members.filter(id=>id!==rec.id).map(id=>recordsById[id]).filter(Boolean);
+    return { grouped:true, groupId:gid, isRep, repRecord, otherMembers, repStatus: tracking[g.repId] };
+  }, [groups, groupIdOfRecord, recordsById, tracking]);
+
+  const renderCard = (r) => (
+    <RecordCard key={r.id} r={r} t={tracking[r.id]} expanded={!!expanded[r.id]}
+      onToggleExpand={()=>setExpanded(e=>({...e,[r.id]:!e[r.id]}))}
+      onStatus={s=>updateEntry(r.id,{status:s})} onMemo={m=>updateEntry(r.id,{memo:m})}
+      link={getLinkMeta(r)} linkingFrom={linkingFrom}
+      onStartLink={()=>startLink(r.id)} onCancelLink={cancelLink}
+      onPickAsTarget={()=>confirmLink(r.id)} onUnlink={()=>unlinkRecord(r.id)} />
+  );
 
   const people = useMemo(()=>{
     const map={};
@@ -286,11 +476,18 @@ function App() {
           <span>관리 중 {trackedRecords.length}건</span>
           {saveState==="saving"&&<span style={{color:"#B45309"}}> · 저장 중…</span>}
           {saveState==="error"&&<span style={{color:"#DC2626"}}> · 저장 실패</span>}
-          {!API_URL&&<span style={{color:"#9CA3AF"}}> · 이 기기 저장</span>}
+          {!FIREBASE_ENABLED&&<span style={{color:"#9CA3AF"}}> · 이 기기 저장</span>}
         </div>
       </header>
 
-      {loadError&&<div style={ui.warnBar}>저장된 진행 상태를 불러오지 못했습니다. 인터넷 연결 또는 구글시트 설정을 확인해 주세요.</div>}
+      {loadError&&<div style={ui.warnBar}>저장된 진행 상태를 불러오지 못했습니다.</div>}
+
+      {linkingFrom&&(
+        <div style={ui.linkBanner}>
+          <span>🔗 <b>{recordsById[linkingFrom]?.date}</b> {normName(recordsById[linkingFrom]?.name||"")} 경험담과 연결할 카드를 탭하세요.</span>
+          <button style={ui.linkBannerBtn} onClick={cancelLink}>취소</button>
+        </div>
+      )}
 
       <nav style={ui.tabs}>
         {[["people","분류별 보기"],["all","전체 경험담"],["board","관리 현황판"]].map(([k,label])=>(
@@ -348,11 +545,7 @@ function App() {
             <label style={ui.checkLabel}><input type="checkbox" checked={trackedOnly} onChange={e=>setTrackedOnly(e.target.checked)} />관리 중만</label>
           </div>
           <div style={ui.countLine}>{filteredRecords.length}건</div>
-          {filteredRecords.map(r=>(
-            <RecordCard key={r.id} r={r} t={tracking[r.id]} expanded={!!expanded[r.id]}
-              onToggleExpand={()=>setExpanded(e=>({...e,[r.id]:!e[r.id]}))}
-              onStatus={s=>updateEntry(r.id,{status:s})} onMemo={m=>updateEntry(r.id,{memo:m})} />
-          ))}
+          {filteredRecords.map(renderCard)}
           {filteredRecords.length===0&&<div style={ui.empty}>조건에 맞는 경험담이 없습니다.</div>}
         </div>
       )}
@@ -374,11 +567,7 @@ function App() {
             return (
               <div key={s.key} style={{marginBottom:28}}>
                 <h3 style={{...ui.boardHeading,color:s.color}}>{s.label} <span style={{color:"#9CA3AF",fontWeight:400}}>{recs.length}건</span></h3>
-                {recs.map(r=>(
-                  <RecordCard key={r.id} r={r} t={tracking[r.id]} expanded={!!expanded[r.id]}
-                    onToggleExpand={()=>setExpanded(e=>({...e,[r.id]:!e[r.id]}))}
-                    onStatus={st=>updateEntry(r.id,{status:st})} onMemo={m=>updateEntry(r.id,{memo:m})} />
-                ))}
+                {recs.map(renderCard)}
               </div>
             );
           })}
@@ -386,28 +575,41 @@ function App() {
       )}
 
       <footer style={ui.footer}>
-        {API_URL?"진행 상태·메모는 구글시트에 저장되어 위원회가 함께 봅니다.":"진행 상태·메모가 이 기기에만 저장됩니다. 공유하려면 구글시트 연동을 설정하세요."}
+        {FIREBASE_ENABLED?"진행 상태·메모는 Firebase에 저장되어 위원회가 함께 봅니다."}
         <br /><span style={{color:"#C0392B"}}>개인정보가 포함되어 있습니다. 링크·파일은 위원회 안에서만 공유해 주세요.</span>
       </footer>
     </div>
   );
 }
 
-function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo }) {
-  const tracked = t?.status && t.status !== "none";
-  const status  = statusOf(t?.status);
-  const [memoDraft, setMemoDraft] = useState(t?.memo || "");
-  useEffect(() => setMemoDraft(t?.memo || ""), [t?.memo]);
+function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo, link, linkingFrom, onStartLink, onCancelLink, onPickAsTarget, onUnlink }) {
+  const grouped = link && link.grouped;
+  const isRep = !grouped || link.isRep;
+  const statusEntry = grouped ? link.repStatus : t;
+  const tracked = statusEntry?.status && statusEntry.status !== "none";
+  const status  = statusOf(statusEntry?.status);
+  const [memoDraft, setMemoDraft] = useState(statusEntry?.memo || "");
+  useEffect(() => setMemoDraft(statusEntry?.memo || ""), [statusEntry?.memo]);
+
+  const isLinkSource  = linkingFrom === r.id;
+  const linkingActive = !!linkingFrom;
+  const isPickTarget  = linkingActive && !isLinkSource;
 
   return (
-    <div style={{...ui.card,...(tracked?ui.cardFlagged:{})}}>
+    <div
+      style={{...ui.card,...(tracked?ui.cardFlagged:{}),...(isLinkSource?ui.cardLinkSource:{}),...(isPickTarget?ui.cardPickable:{})}}
+      onClick={isPickTarget?onPickAsTarget:undefined}>
+      {isPickTarget&&<div style={ui.pickHint}>탭해서 이 경험담과 연결 →</div>}
       <div style={ui.cardTop}>
         <div style={{flex:1,minWidth:0}}>
           <div style={ui.cardMeta}>{r.date} · {monthShort(r.month)} #{r.num} · {normCong(r.cong)}</div>
           <div style={ui.cardName}>{normName(r.name)}<span style={ui.cardPlace}> — {r.place}</span></div>
           {r.keyword&&<span style={ui.keywordChip}>{r.keyword}</span>}
           {tracked&&<span style={{...ui.statusChip,color:status.color,background:status.bg}}>{status.label}</span>}
+          {grouped&&<span style={ui.linkChip}>🔗 {link.otherMembers.length}건과 연결됨</span>}
         </div>
+        {!linkingActive&&<button style={ui.linkBtn} onClick={e=>{e.stopPropagation();onStartLink();}}>🔗 연결</button>}
+        {isLinkSource&&<button style={ui.linkCancelBtn} onClick={e=>{e.stopPropagation();onCancelLink();}}>취소</button>}
       </div>
       <div style={ui.cardBody}>
         <p style={ui.situText}>{r.situation||"(상황 미기재)"}</p>
@@ -417,30 +619,51 @@ function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo }) {
             {r.feeling&&r.feeling!=="-"&&<div style={ui.section}><div style={ui.sectionLabel}>느낀점</div><p style={ui.bodyText}>{r.feeling}</p></div>}
           </div>
         )}
-        <button style={ui.expandBtn} onClick={onToggleExpand}>{expanded?"접기 ▲":"자세히 보기 ▼"}</button>
+        <button style={ui.expandBtn} onClick={e=>{e.stopPropagation();onToggleExpand();}}>{expanded?"접기 ▲":"자세히 보기 ▼"}</button>
       </div>
-      <div style={ui.trackBox}>
-        <div style={ui.trackRow}>
-          <span style={ui.trackLabel}>진행 상태</span>
-          <div style={ui.statusBtns}>
-            {STATUSES.map(s=>(
-              <button key={s.key} onClick={()=>onStatus(s.key)}
-                style={{...ui.statusBtn,...(t?.status===s.key||(!t?.status&&s.key==="none")?{background:s.bg,color:s.color,borderColor:s.color,fontWeight:700}:{})}}>
-                {s.label}
-              </button>
+
+      {grouped&&(
+        <div style={ui.linkBox}>
+          <div style={ui.linkBoxLabel}>🔗 연결된 경험담</div>
+          <div style={ui.linkChips}>
+            {link.otherMembers.map(m=>(
+              <span key={m.id} style={ui.linkMemberChip}>{m.date}{m.id===link.repRecord.id?" · 진행상태 관리":""}</span>
             ))}
           </div>
+          <button style={ui.unlinkBtn} onClick={e=>{e.stopPropagation();onUnlink();}}>이 건만 연결 해제</button>
         </div>
-        {tracked&&(
+      )}
+
+      {isRep ? (
+        <div style={ui.trackBox}>
           <div style={ui.trackRow}>
-            <span style={ui.trackLabel}>메모</span>
-            <input style={ui.memoInput} placeholder="예: 7/10 재방 약속" value={memoDraft}
-              onChange={e=>setMemoDraft(e.target.value)}
-              onBlur={()=>{if(memoDraft!==(t?.memo||""))onMemo(memoDraft);}} />
+            <span style={ui.trackLabel}>진행 상태</span>
+            <div style={ui.statusBtns}>
+              {STATUSES.map(s=>(
+                <button key={s.key} onClick={e=>{e.stopPropagation();onStatus(s.key);}}
+                  style={{...ui.statusBtn,...(statusEntry?.status===s.key||(!statusEntry?.status&&s.key==="none")?{background:s.bg,color:s.color,borderColor:s.color,fontWeight:700}:{})}}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
           </div>
-        )}
-        {tracked&&t?.updatedAt&&<div style={ui.updatedAt}>마지막 수정: {t.updatedAt}</div>}
-      </div>
+          {tracked&&(
+            <div style={ui.trackRow}>
+              <span style={ui.trackLabel}>메모</span>
+              <input style={ui.memoInput} placeholder="예: 7/10 재방 약속" value={memoDraft}
+                onClick={e=>e.stopPropagation()}
+                onChange={e=>setMemoDraft(e.target.value)}
+                onBlur={()=>{if(memoDraft!==(statusEntry?.memo||""))onMemo(memoDraft);}} />
+            </div>
+          )}
+          {tracked&&statusEntry?.updatedAt&&<div style={ui.updatedAt}>마지막 수정: {statusEntry.updatedAt}</div>}
+        </div>
+      ) : (
+        <div style={ui.trackBoxReadonly}>
+          진행 상태는 <b>{link.repRecord.date}</b> 경험담에서 함께 관리합니다.
+          {tracked&&<span style={{...ui.statusChip,color:status.color,background:status.bg,marginLeft:6}}>{status.label}</span>}
+        </div>
+      )}
     </div>
   );
 }
@@ -476,6 +699,20 @@ const ui = {
   countLine:{fontSize:12.5,color:"#9CA3AF",margin:"4px 0 10px"},
   card:{background:"#fff",border:"1px solid #E5E7EB",borderRadius:12,padding:"14px 15px",marginBottom:12},
   cardFlagged:{borderColor:"#B7791F",boxShadow:"0 0 0 1px #B7791F22"},
+  cardLinkSource:{borderColor:"#1E5F4E",boxShadow:"0 0 0 2px #1E5F4E33"},
+  cardPickable:{borderColor:"#1E5F4E",cursor:"pointer",boxShadow:"0 0 0 1px #1E5F4E22"},
+  pickHint:{fontSize:12,color:"#1E5F4E",fontWeight:700,marginBottom:6},
+  linkBtn:{fontSize:11.5,padding:"6px 9px",borderRadius:14,border:"1px solid #D1D5DB",background:"#fff",color:"#374151",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0},
+  linkCancelBtn:{fontSize:11.5,padding:"6px 9px",borderRadius:14,border:"1px solid #DC2626",background:"#FEF2F2",color:"#DC2626",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0},
+  linkChip:{display:"inline-block",fontSize:11.5,background:"#EEF2FF",color:"#4338CA",borderRadius:6,padding:"2px 8px",marginTop:6,marginLeft:6},
+  linkBox:{marginTop:10,padding:"8px 10px",background:"#F5F5F0",borderRadius:8},
+  linkBoxLabel:{fontSize:11,fontWeight:700,color:"#4338CA",marginBottom:4},
+  linkChips:{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6},
+  linkMemberChip:{fontSize:11.5,background:"#fff",border:"1px solid #E5E7EB",borderRadius:6,padding:"2px 8px",color:"#374151"},
+  unlinkBtn:{fontSize:11.5,border:"none",background:"none",color:"#9CA3AF",cursor:"pointer",padding:0,textDecoration:"underline"},
+  trackBoxReadonly:{marginTop:12,paddingTop:12,borderTop:"1px dashed #E5C98F",fontSize:12.5,color:"#6B7280"},
+  linkBanner:{position:"sticky",top:0,zIndex:5,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"#14332B",color:"#fff",borderRadius:10,padding:"10px 14px",fontSize:13,marginBottom:14},
+  linkBannerBtn:{border:"1px solid #ffffff88",background:"transparent",color:"#fff",borderRadius:8,padding:"6px 12px",fontSize:12.5,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0},
   cardTop:{display:"flex",gap:10,alignItems:"flex-start"},
   cardMeta:{fontSize:12,color:"#9CA3AF",marginBottom:2},
   cardName:{fontSize:15.5,fontWeight:700},
@@ -521,7 +758,25 @@ window.renderApp = function() {
 </script>
 
 <script>
-window.SHEET_API_URL = "";
+// ── Firebase 설정 (진행상태·메모 저장용) ──────────────────
+// Firebase 콘솔(console.firebase.google.com) > 프로젝트 설정 > 일반 탭에서
+// "앱 추가 → 웹(</>)"으로 만든 뒤 나오는 값을 아래에 그대로 붙여넣으세요.
+// apiKey를 비워두면 이 브라우저에만 저장되는 기존 방식으로 자동 동작합니다.
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAcGF-N99WSjALvOEZjeJ9WOH_I1ofzPj4",
+  authDomain: "ministry-experience-tracker.firebaseapp.com",
+  databaseURL: "https://ministry-experience-tracker-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "ministry-experience-tracker",
+};
+
+if (window.FIREBASE_CONFIG.apiKey) {
+  firebase.initializeApp(window.FIREBASE_CONFIG);
+  window.firebaseReady = firebase.auth().signInAnonymously()
+    .then(() => firebase.database())
+    .catch(err => { console.error("Firebase 익명 로그인 실패:", err); return null; });
+} else {
+  window.firebaseReady = Promise.resolve(null);
+}
 </script>
 </body>
 </html>
