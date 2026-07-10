@@ -575,7 +575,7 @@ function App() {
       )}
 
       <footer style={ui.footer}>
-        {FIREBASE_ENABLED?"진행 상태·메모는 Firebase에 저장되어 위원회가 함께 봅니다."}
+        {FIREBASE_ENABLED?"진행 상태·메모는 Firebase에 저장되어 위원회가 함께 봅니다.":"진행 상태·메모가 이 기기에만 저장됩니다. 공유하려면 Firebase 연동을 설정하세요."}
         <br /><span style={{color:"#C0392B"}}>개인정보가 포함되어 있습니다. 링크·파일은 위원회 안에서만 공유해 주세요.</span>
       </footer>
     </div>
