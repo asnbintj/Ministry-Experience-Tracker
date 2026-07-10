@@ -200,11 +200,17 @@ function highlightKeywords(text) {
   );
 }
 
+const PHONE_PATTERN = /01[016789][-.\s]?\d{3,4}[-.\s]?\d{4}|0\d{1,2}[-.\s]?\d{3,4}[-.\s]?\d{4}/;
+function hasContactInfo(r) {
+  const text = `${r.situation||""} ${r.response||""} ${r.feeling||""}`;
+  return PHONE_PATTERN.test(text);
+}
+
 const STATUSES = [
   { key:"none",          label:"미지정",         color:"#9CA3AF", bg:"#F3F4F6" },
   { key:"meaningful",    label:"의미 있는 대화",  color:"#0F766E", bg:"#CCFBF1" },
+  { key:"friendly",      label:"우정적인 대화",   color:"#BE185D", bg:"#FCE7F3" },
   { key:"revisit-maybe", label:"재방 가능",       color:"#A16207", bg:"#FEF9C3" },
-  { key:"revisit-plan",  label:"재방 예정",       color:"#B45309", bg:"#FEF3C7" },
   { key:"revisit",       label:"재방 진행 중",    color:"#92400E", bg:"#FDE68A" },
   { key:"study-maybe",   label:"연구 발전 가능",  color:"#0369A1", bg:"#E0F2FE" },
   { key:"study-offer",   label:"연구 제안함",     color:"#1D4ED8", bg:"#DBEAFE" },
@@ -260,6 +266,40 @@ async function apiDeleteGroup(groupId) {
     delete cur[groupId]; localStorage.setItem(GROUPS_LOCAL_KEY, JSON.stringify(cur)); return true;
   }
   try { await db.ref("groups/" + groupId).remove(); return true; } catch (e) { return false; }
+}
+
+const DELETED_LOCAL_KEY = "sunteukgong-deleted-local-v1";
+
+async function apiLoadDeleted() {
+  const db = await window.firebaseReady;
+  if (!db) { try { return JSON.parse(localStorage.getItem(DELETED_LOCAL_KEY)||"{}"); } catch { return {}; } }
+  const snap = await db.ref("deletedRecords").once("value");
+  return snap.val() || {};
+}
+async function apiSetDeleted(id) {
+  const db = await window.firebaseReady;
+  if (!db) {
+    const cur = JSON.parse(localStorage.getItem(DELETED_LOCAL_KEY)||"{}");
+    cur[id] = true; localStorage.setItem(DELETED_LOCAL_KEY, JSON.stringify(cur)); return true;
+  }
+  try { await db.ref("deletedRecords/" + id).set(true); return true; } catch (e) { return false; }
+}
+
+const EDITS_LOCAL_KEY = "sunteukgong-edits-local-v1";
+
+async function apiLoadEdits() {
+  const db = await window.firebaseReady;
+  if (!db) { try { return JSON.parse(localStorage.getItem(EDITS_LOCAL_KEY)||"{}"); } catch { return {}; } }
+  const snap = await db.ref("edits").once("value");
+  return snap.val() || {};
+}
+async function apiSetEdit(id, patch) {
+  const db = await window.firebaseReady;
+  if (!db) {
+    const cur = JSON.parse(localStorage.getItem(EDITS_LOCAL_KEY)||"{}");
+    cur[id] = patch; localStorage.setItem(EDITS_LOCAL_KEY, JSON.stringify(cur)); return true;
+  }
+  try { await db.ref("edits/" + id).set(patch); return true; } catch (e) { return false; }
 }
 
 // 두 경험담(또는 이미 연결된 묶음)을 하나로 합친다.
@@ -344,7 +384,9 @@ function performUnlink(id, { groups, groupIdOfRecord, recordsById, tracking }) {
 }
 
 function App() {
-  const records = DATA; // injected after decryption
+  const [deletedIds,setDeletedIds]     = useState({});
+  const [edits,setEdits]               = useState({});
+  const records = useMemo(()=>DATA.filter(r=>!deletedIds[r.id]).map(r=>edits[r.id]?{...r,...edits[r.id]}:r), [deletedIds, edits]); // injected after decryption
   const [tab,setTab]                   = useState("people");
   const [groupBy,setGroupBy]           = useState("person");
   const [sortBy,setSortBy]             = useState("count");
@@ -361,10 +403,14 @@ function App() {
   const [groups,setGroups]             = useState({});
   const [linkingFrom,setLinkingFrom]   = useState(null);
   const [boardFilter,setBoardFilter]   = useState(null);
+  const [scanMsg,setScanMsg]           = useState(null);
+  const [deleteTargetId,setDeleteTargetId] = useState(null);
 
   useEffect(() => {
     apiLoad().then(t=>{setTracking(t||{});setLoaded(true);}).catch(()=>{setLoadError(true);setLoaded(true);});
     apiLoadGroups().then(g=>setGroups(g||{})).catch(()=>{});
+    apiLoadDeleted().then(d=>setDeletedIds(d||{})).catch(()=>{});
+    apiLoadEdits().then(e=>setEdits(e||{})).catch(()=>{});
   }, []);
 
   const updateEntry = useCallback((id, patch) => {
@@ -380,7 +426,7 @@ function App() {
 
   const isTracked = id => { const s=tracking[id]?.status; return s&&s!=="none"; };
 
-  const recordsById = useMemo(()=>{ const m={}; records.forEach(r=>{m[r.id]=r;}); return m; }, []);
+  const recordsById = useMemo(()=>{ const m={}; records.forEach(r=>{m[r.id]=r;}); return m; }, [deletedIds, edits]);
   const groupIdOfRecord = useMemo(()=>{
     const m={};
     Object.entries(groups).forEach(([gid,g])=>{ (g.members||[]).forEach(id=>{ m[id]=gid; }); });
@@ -411,6 +457,40 @@ function App() {
     applyGroupUpdate(result);
   };
 
+  const updateRecordEdit = useCallback((id, patch) => {
+    setEdits(prev => {
+      const entry = {...(prev[id]||{}), ...patch, updatedAt: new Date().toISOString().slice(0,10)};
+      apiSetEdit(id, entry);
+      return {...prev, [id]: entry};
+    });
+  }, []);
+
+  const runContactScan = () => {
+    let count = 0;
+    records.forEach(r=>{
+      if (!hasContactInfo(r)) return;
+      const gid = groupIdOfRecord[r.id];
+      const targetId = gid && groups[gid] ? groups[gid].repId : r.id;
+      const curStatus = tracking[targetId]?.status || "none";
+      if (curStatus === "none") { updateEntry(targetId, {status:"revisit-maybe"}); count++; }
+    });
+    setScanMsg(count>0
+      ? `📞 연락처가 있는 경험담 ${count}건을 "재방 가능"으로 분류했습니다.`
+      : "새로 분류할 연락처 정보가 발견되지 않았습니다.");
+  };
+
+  const requestDelete = id => setDeleteTargetId(id);
+  const cancelDelete  = () => setDeleteTargetId(null);
+  const confirmDelete = () => {
+    const id = deleteTargetId;
+    if (!id) return;
+    if (groupIdOfRecord[id]) applyGroupUpdate(performUnlink(id, { groups, groupIdOfRecord, recordsById, tracking }));
+    if (tracking[id]?.status && tracking[id].status!=="none") updateEntry(id, { status:"none", memo:"" });
+    setDeletedIds(prev => ({...prev, [id]: true}));
+    apiSetDeleted(id);
+    setDeleteTargetId(null);
+  };
+
   const getLinkMeta = useCallback((rec) => {
     const gid = groupIdOfRecord[rec.id];
     if (!gid || !groups[gid]) return { grouped:false };
@@ -427,7 +507,8 @@ function App() {
       onStatus={s=>updateEntry(r.id,{status:s})} onMemo={m=>updateEntry(r.id,{memo:m})}
       link={getLinkMeta(r)} linkingFrom={linkingFrom}
       onStartLink={()=>startLink(r.id)} onCancelLink={cancelLink}
-      onPickAsTarget={()=>confirmLink(r.id)} onUnlink={()=>unlinkRecord(r.id)} />
+      onPickAsTarget={()=>confirmLink(r.id)} onUnlink={()=>unlinkRecord(r.id)}
+      onDelete={()=>requestDelete(r.id)} onEdit={patch=>updateRecordEdit(r.id,patch)} />
   );
 
   const people = useMemo(()=>{
@@ -439,7 +520,7 @@ function App() {
       const c=normCong(r.cong); if(c!=="회중 미기재") map[n].congs.add(c);
     });
     return Object.values(map);
-  },[]);
+  },[deletedIds, edits]);
 
   const congs = useMemo(()=>{
     const map={};
@@ -449,7 +530,7 @@ function App() {
       map[c].records.push(r); map[c].names.add(normName(r.name));
     });
     return Object.values(map);
-  },[]);
+  },[deletedIds, edits]);
 
   const sortGroups = gs => {
     const a=[...gs];
@@ -466,9 +547,9 @@ function App() {
     if(trackedOnly) r=r.filter(x=>{const s=tracking[x.id]?.status; return s&&s!=="none";});
     if(search.trim()){const q=search.trim(); r=r.filter(x=>x.name.includes(q)||x.place.includes(q)||x.situation.includes(q)||x.response.includes(q)||x.keyword.includes(q)||x.cong.includes(q));}
     return [...r].sort((a,b)=>a.date<b.date?1:-1);
-  },[selectedPerson,selectedCong,monthFilter,search,trackedOnly,tracking]);
+  },[selectedPerson,selectedCong,monthFilter,search,trackedOnly,tracking,deletedIds,edits]);
 
-  const trackedRecords = useMemo(()=>records.filter(r=>tracking[r.id]?.status&&tracking[r.id].status!=="none"),[tracking]);
+  const trackedRecords = useMemo(()=>records.filter(r=>tracking[r.id]?.status&&tracking[r.id].status!=="none"),[tracking,deletedIds,edits]);
   const stats = useMemo(()=>{
     const by={}; STATUSES.forEach(s=>by[s.key]=0);
     trackedRecords.forEach(r=>{const k=tracking[r.id]?.status||"none"; by[k]=(by[k]||0)+1;});
@@ -565,6 +646,10 @@ function App() {
 
       {tab==="board"&&(
         <div>
+          <div style={ui.scanRow}>
+            <button style={ui.scanBtn} onClick={runContactScan}>📞 연락처 감지 → 재방 가능 자동분류</button>
+            {scanMsg&&<span style={ui.scanMsg}>{scanMsg}</span>}
+          </div>
           <div style={ui.statRow}>
             {STATUSES.filter(s=>s.key!=="none").map(s=>{
               const active=boardFilter===s.key;
@@ -604,11 +689,24 @@ function App() {
         {FIREBASE_ENABLED?"진행 상태·메모는 Firebase에 저장되어 위원회가 함께 봅니다.":"진행 상태·메모가 이 기기에만 저장됩니다. 공유하려면 Firebase 연동을 설정하세요."}
         <br /><span style={{color:"#C0392B"}}>개인정보가 포함되어 있습니다. 링크·파일은 위원회 안에서만 공유해 주세요.</span>
       </footer>
+
+      {deleteTargetId&&(
+        <div style={ui.modalOverlay} onClick={cancelDelete}>
+          <div style={ui.modalBox} onClick={e=>e.stopPropagation()}>
+            <div style={ui.modalTitle}>삭제 하시겠습니까?</div>
+            <div style={ui.modalDesc}>삭제된 경험담은 목록에서 사라지며 되돌릴 수 없습니다.</div>
+            <div style={ui.modalBtns}>
+              <button style={ui.modalCancelBtn} onClick={cancelDelete}>취소</button>
+              <button style={ui.modalDeleteBtn} onClick={confirmDelete}>삭제</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo, link, linkingFrom, onStartLink, onCancelLink, onPickAsTarget, onUnlink }) {
+function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo, link, linkingFrom, onStartLink, onCancelLink, onPickAsTarget, onUnlink, onDelete, onEdit }) {
   const grouped = link && link.grouped;
   const isRep = !grouped || link.isRep;
   const statusEntry = grouped ? link.repStatus : t;
@@ -616,6 +714,19 @@ function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo, link, li
   const status  = statusOf(statusEntry?.status);
   const [memoDraft, setMemoDraft] = useState(statusEntry?.memo || "");
   useEffect(() => setMemoDraft(statusEntry?.memo || ""), [statusEntry?.memo]);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const startEdit = () => {
+    setDraft({
+      name: r.name || "", place: r.place || "", keyword: r.keyword || "",
+      situation: r.situation || "", response: r.response || "",
+      feeling: (r.feeling && r.feeling !== "-") ? r.feeling : "",
+    });
+    setIsEditing(true);
+  };
+  const cancelEdit = () => setIsEditing(false);
+  const saveEdit = () => { onEdit(draft); setIsEditing(false); };
 
   const isLinkSource  = linkingFrom === r.id;
   const linkingActive = !!linkingFrom;
@@ -629,24 +740,50 @@ function RecordCard({ r, t, expanded, onToggleExpand, onStatus, onMemo, link, li
       <div style={ui.cardTop}>
         <div style={{flex:1,minWidth:0}}>
           <div style={ui.cardMeta}>{r.date} · {monthShort(r.month)} #{r.num} · {normCong(r.cong)}</div>
-          <div style={ui.cardName}>{normName(r.name)}<span style={ui.cardPlace}> — {r.place}</span></div>
-          {r.keyword&&<span style={ui.keywordChip}>{r.keyword}</span>}
-          {tracked&&<span style={{...ui.statusChip,color:status.color,background:status.bg}}>{status.label}</span>}
-          {grouped&&<span style={ui.linkChip}>🔗 {link.otherMembers.length}건과 연결됨</span>}
+          {!isEditing&&(
+            <React.Fragment>
+              <div style={ui.cardName}>{normName(r.name)}<span style={ui.cardPlace}> — {r.place}</span></div>
+              {r.keyword&&<span style={ui.keywordChip}>{r.keyword}</span>}
+              {tracked&&<span style={{...ui.statusChip,color:status.color,background:status.bg}}>{status.label}</span>}
+              {grouped&&<span style={ui.linkChip}>🔗 {link.otherMembers.length}건과 연결됨</span>}
+            </React.Fragment>
+          )}
         </div>
-        {!linkingActive&&<button style={ui.linkBtn} onClick={e=>{e.stopPropagation();onStartLink();}}>🔗 연결</button>}
+        {!linkingActive&&!isEditing&&<button style={ui.editBtn} onClick={e=>{e.stopPropagation();startEdit();}}>✏ 수정</button>}
+        {!linkingActive&&!isEditing&&<button style={ui.linkBtn} onClick={e=>{e.stopPropagation();onStartLink();}}>🔗 연결</button>}
         {isLinkSource&&<button style={ui.linkCancelBtn} onClick={e=>{e.stopPropagation();onCancelLink();}}>취소</button>}
+        {!linkingActive&&!isEditing&&<button style={ui.deleteBtn} onClick={e=>{e.stopPropagation();onDelete();}}>🗑 삭제</button>}
       </div>
-      <div style={ui.cardBody}>
-        <p style={ui.situText}>{r.situation?highlightKeywords(r.situation):"(상황 미기재)"}</p>
-        {expanded&&(
-          <div>
-            {r.response&&<div style={ui.section}><div style={ui.sectionLabel}>응대</div><p style={ui.bodyText}>{highlightKeywords(r.response)}</p></div>}
-            {r.feeling&&r.feeling!=="-"&&<div style={ui.section}><div style={ui.sectionLabel}>느낀점</div><p style={ui.bodyText}>{highlightKeywords(r.feeling)}</p></div>}
+      {isEditing ? (
+        <div style={ui.editForm} onClick={e=>e.stopPropagation()}>
+          <div style={ui.editRow}>
+            <input style={ui.editInput} placeholder="이름" value={draft.name} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} />
+            <input style={ui.editInput} placeholder="장소" value={draft.place} onChange={e=>setDraft(d=>({...d,place:e.target.value}))} />
           </div>
-        )}
-        <button style={ui.expandBtn} onClick={e=>{e.stopPropagation();onToggleExpand();}}>{expanded?"접기 ▲":"자세히 보기 ▼"}</button>
-      </div>
+          <input style={ui.editInputFull} placeholder="키워드" value={draft.keyword} onChange={e=>setDraft(d=>({...d,keyword:e.target.value}))} />
+          <div style={ui.editLabel}>상황</div>
+          <textarea style={ui.editTextarea} value={draft.situation} onChange={e=>setDraft(d=>({...d,situation:e.target.value}))} />
+          <div style={ui.editLabel}>응대</div>
+          <textarea style={ui.editTextarea} value={draft.response} onChange={e=>setDraft(d=>({...d,response:e.target.value}))} />
+          <div style={ui.editLabel}>느낀점</div>
+          <textarea style={ui.editTextarea} value={draft.feeling} onChange={e=>setDraft(d=>({...d,feeling:e.target.value}))} />
+          <div style={ui.editBtnRow}>
+            <button style={ui.modalCancelBtn} onClick={cancelEdit}>취소</button>
+            <button style={ui.editSaveBtn} onClick={saveEdit}>저장</button>
+          </div>
+        </div>
+      ) : (
+        <div style={ui.cardBody}>
+          <p style={ui.situText}>{r.situation?highlightKeywords(r.situation):"(상황 미기재)"}</p>
+          {expanded&&(
+            <div>
+              {r.response&&<div style={ui.section}><div style={ui.sectionLabel}>응대</div><p style={ui.bodyText}>{highlightKeywords(r.response)}</p></div>}
+              {r.feeling&&r.feeling!=="-"&&<div style={ui.section}><div style={ui.sectionLabel}>느낀점</div><p style={ui.bodyText}>{highlightKeywords(r.feeling)}</p></div>}
+            </div>
+          )}
+          <button style={ui.expandBtn} onClick={e=>{e.stopPropagation();onToggleExpand();}}>{expanded?"접기 ▲":"자세히 보기 ▼"}</button>
+        </div>
+      )}
 
       {grouped&&(
         <div style={ui.linkBox}>
@@ -730,6 +867,23 @@ const ui = {
   pickHint:{fontSize:12,color:"#1E5F4E",fontWeight:700,marginBottom:6},
   linkBtn:{fontSize:11.5,padding:"6px 9px",borderRadius:14,border:"1px solid #D1D5DB",background:"#fff",color:"#374151",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0},
   linkCancelBtn:{fontSize:11.5,padding:"6px 9px",borderRadius:14,border:"1px solid #DC2626",background:"#FEF2F2",color:"#DC2626",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0},
+  deleteBtn:{fontSize:11.5,padding:"6px 9px",borderRadius:14,border:"1px solid #D1D5DB",background:"#fff",color:"#9CA3AF",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0,marginLeft:6},
+  editBtn:{fontSize:11.5,padding:"6px 9px",borderRadius:14,border:"1px solid #2563EB",background:"#EFF6FF",color:"#2563EB",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0},
+  editForm:{padding:"12px 14px",background:"#F9FAFB",borderTop:"1px solid #E5E7EB",borderBottom:"1px solid #E5E7EB"},
+  editRow:{display:"flex",gap:8,marginBottom:8},
+  editInput:{flex:1,minWidth:0,fontSize:13,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff"},
+  editInputFull:{width:"100%",fontSize:13,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff",marginBottom:10,boxSizing:"border-box"},
+  editLabel:{fontSize:11.5,fontWeight:700,color:"#6B7280",marginBottom:4},
+  editTextarea:{width:"100%",fontSize:13.5,lineHeight:1.5,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff",marginBottom:10,minHeight:60,resize:"vertical",boxSizing:"border-box",fontFamily:"inherit"},
+  editBtnRow:{display:"flex",gap:8,justifyContent:"flex-end"},
+  editSaveBtn:{padding:"9px 16px",borderRadius:10,border:"1px solid #2563EB",background:"#2563EB",color:"#fff",fontSize:13.5,fontWeight:700,cursor:"pointer"},
+  modalOverlay:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:16},
+  modalBox:{background:"#fff",borderRadius:14,padding:"22px 20px",maxWidth:320,width:"100%",boxShadow:"0 10px 30px rgba(0,0,0,0.25)"},
+  modalTitle:{fontSize:16,fontWeight:800,color:"#14332B",marginBottom:8},
+  modalDesc:{fontSize:13,color:"#6B7280",lineHeight:1.5,marginBottom:20},
+  modalBtns:{display:"flex",gap:8,justifyContent:"flex-end"},
+  modalCancelBtn:{padding:"9px 16px",borderRadius:10,border:"1px solid #D1D5DB",background:"#fff",color:"#374151",fontSize:13.5,cursor:"pointer"},
+  modalDeleteBtn:{padding:"9px 16px",borderRadius:10,border:"1px solid #DC2626",background:"#DC2626",color:"#fff",fontSize:13.5,fontWeight:700,cursor:"pointer"},
   linkChip:{display:"inline-block",fontSize:11.5,background:"#EEF2FF",color:"#4338CA",borderRadius:6,padding:"2px 8px",marginTop:6,marginLeft:6},
   linkBox:{marginTop:10,padding:"8px 10px",background:"#F5F5F0",borderRadius:8},
   linkBoxLabel:{fontSize:11,fontWeight:700,color:"#4338CA",marginBottom:4},
@@ -758,6 +912,9 @@ const ui = {
   statusBtn:{fontSize:12.5,padding:"8px 12px",borderRadius:16,border:"1px solid #E5E7EB",background:"#fff",color:"#6B7280",cursor:"pointer"},
   memoInput:{flex:1,minWidth:180,padding:"10px 12px",borderRadius:8,border:"1px solid #E5E7EB",fontSize:15},
   updatedAt:{fontSize:11,color:"#B4B4B4",textAlign:"right",width:"100%"},
+  scanRow:{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10,marginBottom:16},
+  scanBtn:{fontSize:12.5,padding:"9px 14px",borderRadius:10,border:"1px solid #A16207",background:"#FEF9C3",color:"#A16207",cursor:"pointer",whiteSpace:"nowrap",fontWeight:600},
+  scanMsg:{fontSize:12.5,color:"#6B7280"},
   statRow:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))",gap:10,marginBottom:24},
   statCard:{background:"#fff",border:"1px solid #E5E7EB",borderRadius:10,padding:"12px 8px",textAlign:"center"},
   boardHeading:{fontSize:16,fontWeight:800,margin:"0 0 10px"},
