@@ -105,9 +105,25 @@ async function decryptData(password, b64) {
 let DATA = null;
 const REMEMBER_KEY = "sunteuk-pw"; // sessionStorage: 이 탭을 닫으면 자동 삭제됨
 
+// 데이터에 같은 id("월-번호")가 중복으로 들어있으면 진행상태·펼치기 상태가
+// 서로 다른 경험담끼리 섞여버리므로, 첫 건은 그대로 두고 이후 중복 건에는
+// 고유한 id를 새로 부여한다.
+function dedupeIds(data) {
+  const seen = {};
+  data.forEach(r => {
+    if (seen[r.id]) {
+      let n = 2, newId = r.id + "-" + n;
+      while (seen[newId]) { n++; newId = r.id + "-" + n; }
+      r.id = newId;
+    }
+    seen[r.id] = true;
+  });
+}
+
 async function unlockWithPassword(pw) {
   const b64 = document.getElementById("enc-data").textContent.trim();
   DATA = await decryptData(pw, b64);
+  dedupeIds(DATA);
   document.getElementById("lock-screen").style.display = "none";
   document.getElementById("root").style.display = "";
   renderApp();
@@ -630,6 +646,7 @@ function App() {
 
       {tab==="board"&&(
         <div>
+          <div style={ui.boardTotalLine}>전체 경험담 {records.length}건 중 관리 중 {trackedRecords.length}건</div>
           <div style={ui.statRow}>
             {STATUSES.filter(s=>s.key!=="none").map(s=>{
               const active=boardFilter===s.key;
@@ -854,7 +871,7 @@ const ui = {
   editInput:{flex:1,minWidth:0,fontSize:13,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff"},
   editInputFull:{width:"100%",fontSize:13,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff",marginBottom:10,boxSizing:"border-box"},
   editLabel:{fontSize:11.5,fontWeight:700,color:"#6B7280",marginBottom:4},
-  editTextarea:{width:"100%",fontSize:13.5,lineHeight:1.5,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff",marginBottom:10,minHeight:60,resize:"vertical",boxSizing:"border-box",fontFamily:"inherit"},
+  editTextarea:{width:"100%",fontSize:13.5,lineHeight:1.5,padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",background:"#fff",marginBottom:10,minHeight:130,resize:"vertical",boxSizing:"border-box",fontFamily:"inherit"},
   editBtnRow:{display:"flex",gap:8,justifyContent:"flex-end"},
   editSaveBtn:{padding:"9px 16px",borderRadius:10,border:"1px solid #2563EB",background:"#2563EB",color:"#fff",fontSize:13.5,fontWeight:700,cursor:"pointer"},
   modalOverlay:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:16},
@@ -893,6 +910,7 @@ const ui = {
   statusBtn:{fontSize:12.5,padding:"8px 12px",borderRadius:16,border:"1px solid #E5E7EB",background:"#fff",color:"#6B7280",cursor:"pointer"},
   memoInput:{flex:1,minWidth:180,padding:"10px 12px",borderRadius:8,border:"1px solid #E5E7EB",fontSize:15},
   updatedAt:{fontSize:11,color:"#B4B4B4",textAlign:"right",width:"100%"},
+  boardTotalLine:{fontSize:13,color:"#6B7280",marginBottom:12},
   statRow:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))",gap:10,marginBottom:24},
   statCard:{background:"#fff",border:"1px solid #E5E7EB",borderRadius:10,padding:"12px 8px",textAlign:"center"},
   boardHeading:{fontSize:16,fontWeight:800,margin:"0 0 10px"},
